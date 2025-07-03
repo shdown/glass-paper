@@ -74,7 +74,7 @@ Optional:
  * `GLASS_WITH_FIRST_LAST_PTRS` (0 or 1): whether or not to cache iterators to the first and last elements (see section 5.4 of the paper for details).
  * `GLASS_WITH_FIRST_LAST_PTRS_LAZY` (0 or 1): if `GLASS_WITH_FIRST_LAST_PTRS` is enabled, whether or not the first/last iterators cache should be lazy (see section 5.4 of the paper for details).
  * `GLASS_WITH_HT` (0 or 1): whether or not to use *hash table* (or, rather, a *cache table*) (see section 5.2 of the paper for details).
- * `GLASS_WITH_HT_PREV_PTR` (0 or 1): whether or not the hash table chains should be doubly-linked (as opposed to singly-linked). Although this saves some memory, a deletion from the hash table is not guaranteed to be hard O(1) if this option is enabled.
+ * `GLASS_WITH_HT_PREV_PTR` (0 or 1): whether or not the hash table chains should be doubly-linked (as opposed to singly-linked). Although disabling this saves some memory, in such a case a deletion from the hash table is no longer guaranteed to be hard O(1).
  * `GLASS_HT_MAX_LOOKUP_LEN`: how many first elements of the chain are to be examined during the hash table lookup before giving up and returning “don’t know” answer. Defaults to 5.
  * `GLASS_WITH_HT_HEALTH_CHECKS` (0 or 1): (**Never enable in production — will cause insane slowdown!**) whether or not to perform very costly, O(n) health-checks each time a hash table is accessed.
  * `GLASS_WITH_ASM` (0 or 1): whether or not to use intrinsics specific to x86-64 architecture and BMI2 instruction set. Note that this restricts `GLASS_N` to be <= 8.
