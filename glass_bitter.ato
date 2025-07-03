@@ -1,0 +1,199 @@
+// (c) 2025 shdown
+// This code is licensed under MIT license (see LICENSE.MIT for details)
+
+#if 0
+@@temp
+#define GLASS__BIT_POS_WITH_ASM_EXT (GLASS_K <= 64 && GLASS_WITH_ASM)
+#else
+@@temp
+#define GLASS__BIT_POS_WITH_ASM_EXT 0
+#endif
+
+#if GLASS__BIT_POS_WITH_ASM_EXT
+# if GLASS_K <= 32
+typedef uint32_t @_K_ASM_TYPE;
+# else
+typedef uint64_t @_K_ASM_TYPE;
+# endif
+#endif
+
+typedef struct {
+#if GLASS__BIT_POS_WITH_ASM_EXT
+    union {
+        struct {
+            int8_t v;
+            uint8_t asm_len;
+        };
+        @_K_ASM_TYPE asm_control;
+    };
+#else
+    int v;
+#endif
+} @_BitPos;
+
+@~force_inline @_BitPos @_bit_pos_from_depth(int depth)
+{
+    int v = (@_NCHUNKS - 1 - depth) * @_C;
+    return (@_BitPos) {
+#if GLASS__BIT_POS_WITH_ASM_EXT
+        .v = (int8_t) v,
+        .asm_len = @_C,
+#else
+        .v = v,
+#endif
+    };
+}
+
+@~force_inline @_BitPos @_bit_pos_from_root(void)
+{
+    return @_bit_pos_from_depth(0);
+}
+
+@~force_inline @_BitPos @_bit_pos_from_leaf(void)
+{
+    return @_bit_pos_from_depth(@_NCHUNKS - 1);
+}
+
+@~force_inline @_BitPos @_bit_pos_from_postleaf(void)
+{
+    return @_bit_pos_from_depth(@_NCHUNKS);
+}
+
+@~force_inline @_BitPos @_bit_pos_down(@_BitPos bit_pos)
+{
+    bit_pos.v -= @_C;
+    return bit_pos;
+}
+
+@~force_inline @_BitPos @_bit_pos_up(@_BitPos bit_pos)
+{
+    bit_pos.v += @_C;
+    return bit_pos;
+}
+
+@~force_inline bool @_bit_pos_is_root(@_BitPos bit_pos)
+{
+    return bit_pos.v == ((@_NCHUNKS - 1) * @_C);
+}
+
+@~force_inline bool @_bit_pos_is_leaf(@_BitPos bit_pos)
+{
+    return bit_pos.v == 0;
+}
+
+@~force_inline bool @_bit_pos_is_postleaf(@_BitPos bit_pos)
+{
+    return bit_pos.v < 0;
+}
+
+@~force_inline int @_bit_pos_to_depth(@_BitPos bit_pos)
+{
+    int32_t v = bit_pos.v;
+
+#define GLASS__CASE(ModInv_, Shift_) \
+    return @_NCHUNKS - 1 - (v >> (Shift_)) * UINT32_C(ModInv_);
+
+#include "glass_invmod.inc"
+
+#undef GLASS__CASE
+}
+
+@~force_inline GLASS_KEY @_bitter_k_zero_lsb_up_to_this(GLASS_KEY k, @_BitPos bit_pos)
+{
+    GLASS__ASSERT(bit_pos.v >= 0);
+
+    k >>= bit_pos.v;
+    k <<= bit_pos.v;
+    return k;
+}
+
+@~force_inline GLASS_KEY @_bitter_k_zero_lsb_including_this(GLASS_KEY k, @_BitPos bit_pos)
+{
+    GLASS__ASSERT(bit_pos.v >= 0);
+
+    enum { MASK = (1 << @_C) - 1 };
+    k >>= bit_pos.v;
+    k &= ~MASK;
+    k <<= bit_pos.v;
+    return k;
+}
+
+@~force_inline GLASS_KEY @_bitter_k_zero_lsb_including_this_maybe_postleaf_non_root(GLASS_KEY k, @_BitPos bit_pos)
+{
+    GLASS__ASSERT(bit_pos.v != (@_NCHUNKS - 1) * @_C);
+
+    int shift = bit_pos.v + @_C;
+    k >>= shift;
+    k <<= shift;
+    return k;
+}
+
+@~force_inline int @_bitter_k_select_chunk(GLASS_KEY k, @_BitPos bit_pos)
+{
+    GLASS__ASSERT(bit_pos.v >= 0);
+
+#if GLASS__BIT_POS_WITH_ASM_EXT
+    return GLASS__ASM_EXTRACT_BITS_RAW((@_K_ASM_TYPE) k, bit_pos.asm_control);
+#else
+    enum { MASK = (1 << @_C) - 1 };
+    return (k >> bit_pos.v) & MASK;
+#endif
+}
+
+@~force_inline GLASS_KEY @_bitter_k_split_chunk(GLASS_KEY k, @_BitPos bit_pos, int *out_chunk)
+{
+    GLASS__ASSERT(bit_pos.v >= 0);
+
+#if GLASS__BIT_POS_WITH_ASM_EXT
+    GLASS_KEY chunk = GLASS__ASM_EXTRACT_BITS_RAW((@_K_ASM_TYPE) k, bit_pos.asm_control);
+    k ^= chunk << bit_pos.v;
+#else
+    enum { MASK = (1 << @_C) - 1 };
+
+    k >>= bit_pos.v;
+    GLASS_KEY chunk = k & MASK;
+    k ^= chunk;
+    k <<= bit_pos.v;
+#endif
+    *out_chunk = chunk;
+    return k;
+}
+
+@~force_inline GLASS_KEY @_bitter_k_insert_chunk(GLASS_KEY k, GLASS_KEY chunk, @_BitPos bit_pos)
+{
+    GLASS__ASSERT(bit_pos.v >= 0);
+
+    return k | (chunk << bit_pos.v);
+}
+
+@~force_inline int @_bitter_common_chunks(GLASS_KEY a, GLASS_KEY b)
+{
+#if GLASS_K + GLASS__C + 1 < 256
+    typedef uint8_t DIV_TYPE;
+#elif GLASS_K + GLASS__C + 1 < 65536
+    typedef uint16_t DIV_TYPE;
+#else
+    typedef uint32_t DIV_TYPE;
+#endif
+
+    int n = (@_C - @_ODD_CHUNK_WIDTH) - (sizeof(GLASS_KEY) * 8 - GLASS_K) + glass_clzg2(a ^ b, (int) sizeof(GLASS_KEY) * 8);
+    return ((DIV_TYPE) n) / @_C;
+}
+
+@~force_inline GLASS_KEY @_bitter_k_insert_postleaf(GLASS_KEY k, GLASS_KEY chunk)
+{
+    return k | chunk;
+}
+
+@~force_inline GLASS_KEY @_bitter_k_extract_postleaf(GLASS_KEY k)
+{
+    enum { MASK = (1 << @_C) - 1 };
+    return k & MASK;
+}
+
+@~force_inline GLASS_KEY @_bitter_k_split_postleaf(GLASS_KEY k, int *out_chunk)
+{
+    GLASS_KEY chunk = @_bitter_k_extract_postleaf(k);
+    *out_chunk = chunk;
+    return k ^ chunk;
+}

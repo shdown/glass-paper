@@ -1,0 +1,94 @@
+// (c) 2025 shdown
+// This code is licensed under MIT license (see LICENSE.MIT for details)
+
+@@project GLASS__PREVNEXT
+
+@@boilerplate
+
+@@require GLASS__PREVNEXT_T
+@@require GLASS__PREVNEXT_N
+
+enum { @_W = sizeof(GLASS__PREVNEXT_T) * 8 };
+
+// ASM nops: N/A
+// Dumb nops: 2
+@~force_inline GLASS__PREVNEXT_T @zero_lo_inclusive(GLASS__PREVNEXT_T x, int idx)
+{
+#if 0 && GLASS_WITH_ASM && (GLASS__PREVNEXT_N <= 64)
+# if 0
+    GLASS__PREVNEXT_T x1 = GLASS__ASM_EXTRACT_BITS(x, 0, idx + 1);
+    return x ^ x1;
+# else
+    // From https://www.felixcloutier.com/x86/bzhi it seems BZHI returns its operand unmodified if (idx == @_W).
+    GLASS__PREVNEXT_T x1 = GLASS__ASM_CLEAR_HI(x, idx + 1);
+    return x ^ x1;
+# endif
+
+#else
+# if 0
+    GLASS__PREVNEXT_T prohibit = (((GLASS__PREVNEXT_T) 2) << idx) - 1;
+    return x & ~prohibit;
+# else
+    GLASS__PREVNEXT_T allow = ((GLASS__PREVNEXT_T) -2) << idx;
+    return x & allow;
+# endif
+#endif
+}
+
+// ASM nops: 1
+// Dumb nops: 3
+@~force_inline GLASS__PREVNEXT_T @zero_hi_inclusive(GLASS__PREVNEXT_T x, int idx)
+{
+#if GLASS_WITH_ASM && (GLASS__PREVNEXT_N <= 64)
+# if 0
+    return GLASS__ASM_EXTRACT_BITS(x, 0, idx);
+# else
+    return GLASS__ASM_CLEAR_HI(x, idx);
+# endif
+
+#else
+    GLASS__PREVNEXT_T allow = (((GLASS__PREVNEXT_T) 1) << idx) - 1;
+    return x & allow;
+#endif
+}
+
+// Nops: 2
+@~force_inline GLASS__PREVNEXT_T @zero_lo_exclusive(GLASS__PREVNEXT_T x, int idx)
+{
+    x >>= idx;
+    x <<= idx;
+    return x;
+}
+
+// ASM nops: 2
+// Dumb nops: 3
+@~force_inline GLASS__PREVNEXT_T @zero_hi_exclusive(GLASS__PREVNEXT_T x, int idx)
+{
+#if GLASS_WITH_ASM && (GLASS__PREVNEXT_N <= 64)
+    // From https://www.felixcloutier.com/x86/bzhi it seems BZHI returns its operand unmodified if (idx == @_W).
+    return GLASS__ASM_CLEAR_HI(x, idx + 1);
+#else
+    int shift = @_W - 1 - idx;
+    x <<= shift;
+    x >>= shift;
+    return x;
+#endif
+}
+
+@~force_inline int @find_first_set(GLASS__PREVNEXT_T x, bool may_fail)
+{
+    if (may_fail) {
+        return glass_ctzg2(x, (int) @_W);
+    } else {
+        return glass_ctzg(x);
+    }
+}
+
+@~force_inline int @find_last_set(GLASS__PREVNEXT_T x, bool may_fail)
+{
+    if (may_fail) {
+        return @_W - 1 - glass_clzg2(x, -1);
+    } else {
+        return @_W - 1 - glass_clzg(x);
+    }
+}

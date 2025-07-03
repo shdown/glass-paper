@@ -1,0 +1,142 @@
+// (c) 2025 shdown
+// This code is licensed under MIT license (see LICENSE.MIT for details)
+
+#if __cplusplus
+
+// Method: C++11
+
+#include <type_traits>
+
+@@temp
+#define GLASS__FORCE_INLINE_CXX inline __attribute__((always_inline))
+
+template<bool Pred, class Ret, class Values, class ...Args>
+typename std::enable_if<Pred, Ret>::type
+static GLASS__FORCE_INLINE_CXX
+@_choice_cxx(Args ...args)
+{
+    return Values::if_true(args...);
+}
+
+template<bool Pred, class Ret, class Values, class ...Args>
+typename std::enable_if<!Pred, Ret>::type
+static GLASS__FORCE_INLINE_CXX
+@_choice_cxx(Args ...args)
+{
+    return Values::if_false(args...);
+}
+
+@@temp
+#define GLASS_GENERIC_1__RAW(ResType_, X_, Func_, FuncLL_) \
+    ({ \
+        using TX__ = decltype((X_)); \
+        struct Values__ \
+        { \
+            static GLASS__FORCE_INLINE_CXX \
+            ResType_ if_true(TX__ x__) \
+            { \
+                return Func_(x__); \
+            }; \
+            static GLASS__FORCE_INLINE_CXX \
+            ResType_ if_false(TX__ x__) \
+            { \
+                return FuncLL_(x__); \
+            }; \
+        }; \
+        constexpr bool IS_SMALL__ = sizeof(TX__) <= 4; \
+        @_choice_cxx<IS_SMALL__, ResType_, Values__, TX__>((X_)); \
+    })
+
+@@temp
+#define GLASS_GENERIC_2__RAW(ResType_, X_, Y_, Func_, FuncLL_) \
+    ({ \
+        using TX__ = decltype((X_)); \
+        using TY__ = decltype((Y_)); \
+        struct Values__ \
+        { \
+            static GLASS__FORCE_INLINE_CXX \
+            ResType_ if_true(TX__ x__, TY__ y__) \
+            { \
+                return Func_(x__, y__); \
+            }; \
+            static GLASS__FORCE_INLINE_CXX \
+            ResType_ if_false(TX__ x__, TY__ y__) \
+            { \
+                return FuncLL_(x__, y__); \
+            }; \
+        }; \
+        constexpr bool IS_SMALL__ = sizeof(TX__) <= 4; \
+        @_choice_cxx<IS_SMALL__, ResType_, Values__, TX__, TY__>((X_), (Y_)); \
+    })
+
+#elif __STDC_VERSION__ >= 202311L
+
+// Method: C11's _Generic
+
+@@temp
+#define GLASS_GENERIC_1__RAW(ResType_, X_, Func_, FuncLL_) \
+    ((ResType_) ((_Generic((X_), \
+        uint64_t: FuncLL_((X_)), \
+        int64_t: FuncLL_((X_)), \
+        \
+        uint32_t: Func_((X_)), \
+        int32_t: Func_((X_)), \
+        \
+        uint16_t: Func_((X_)), \
+        int16_t: Func_((X_)), \
+        \
+        uint8_t: Func_((X_)), \
+        int8_t: Func_((X_)), \
+        \
+        default: (void) 0))))
+
+@@temp
+#define GLASS_GENERIC_2__RAW(ResType_, X_, Y_, Func_, FuncLL_) \
+    ((ResType_) ((_Generic((X_), \
+        uint64_t: FuncLL_((X_), (Y_)), \
+        int64_t: FuncLL_((X_), (Y_)), \
+        \
+        uint32_t: Func_((X_), (Y_)), \
+        int32_t: Func_((X_), (Y_)), \
+        \
+        uint16_t: Func_((X_), (Y_)), \
+        int16_t: Func_((X_), (Y_)), \
+        \
+        uint8_t: Func_((X_), (Y_)), \
+        int8_t: Func_((X_), (Y_)), \
+        \
+        default: (void) 0))))
+
+#else
+
+// Method: GCC extensions (C only, doesn't work in C++)
+
+@@temp
+#define GLASS_GENERIC_1__RAW(ResType_, X_, Func_, FuncLL_) \
+    ((ResType_) __builtin_choose_expr( \
+        sizeof((X_)) <= 4, \
+        Func_((X_)), \
+        FuncLL_((X_))))
+
+@@temp
+#define GLASS_GENERIC_2__RAW(ResType_, X_, Y_, Func_, FuncLL_) \
+    ((ResType_) __builtin_choose_expr( \
+        sizeof((X_)) <= 4, \
+        Func_((X_), (Y_)), \
+        FuncLL_((X_), (Y_))))
+
+#endif
+
+@@temp
+#define GLASS_GENERIC_1(ResType_, X_, Func_, FuncLL_) \
+    ({ \
+        GLASS__STATIC_ASSERT(int_generic1_width_too_big, sizeof((X_)) <= 8); \
+        GLASS_GENERIC_1__RAW(ResType_, (X_), Func_, FuncLL_); \
+    })
+
+@@temp
+#define GLASS_GENERIC_2(ResType_, X_, Y_, Func_, FuncLL_) \
+    ({ \
+        GLASS__STATIC_ASSERT(int_generic2_width_too_big, sizeof((X_)) <= 8); \
+        GLASS_GENERIC_2__RAW(ResType_, (X_), (Y_), Func_, FuncLL_); \
+    })

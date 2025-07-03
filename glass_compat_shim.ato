@@ -1,0 +1,49 @@
+// (c) 2025 shdown
+// This code is licensed under MIT license (see LICENSE.MIT for details)
+
+#if GLASS_WITH_COMPAT_SHIM
+
+@@temp
+#define glass_popcountg(X_) GLASS_GENERIC_1(int, (X_), __builtin_popcount, __builtin_popcountll)
+@@temp
+#define glass_clzg(X_)      GLASS_GENERIC_1(int, (X_), __builtin_clz, __builtin_clzll)
+@@temp
+#define glass_ctzg(X_)      GLASS_GENERIC_1(int, (X_), __builtin_ctz, __builtin_ctzll)
+
+@@temp
+#define glass__xxxg2_impl(X_, Y_, TheFunc_) \
+    ({ \
+        __typeof__((X_)) val__ = (X_); \
+        val__ ? TheFunc_(val__) : (int) (Y_); \
+    })
+
+@@temp
+#define glass_clzg2_impl(X_, Y_)    glass__xxxg2_impl((X_), (Y_), __builtin_clz)
+@@temp
+#define glass_clzg2_impl_LL(X_, Y_) glass__xxxg2_impl((X_), (Y_), __builtin_clzll)
+
+@@temp
+#define glass_ctzg2_impl(X_, Y_)    glass__xxxg2_impl((X_), (Y_), __builtin_ctz)
+@@temp
+#define glass_ctzg2_impl_LL(X_, Y_) glass__xxxg2_impl((X_), (Y_), __builtin_ctzll)
+
+@@temp
+#define glass_clzg2(X_, Y_) GLASS_GENERIC_2(int, (X_), (Y_), glass_clzg2_impl, glass_clzg2_impl_LL)
+
+@@temp
+#define glass_ctzg2(X_, Y_) GLASS_GENERIC_2(int, (X_), (Y_), glass_ctzg2_impl, glass_ctzg2_impl_LL)
+
+#else
+
+@@temp
+#define glass_popcountg __builtin_popcountg
+@@temp
+#define glass_clzg      __builtin_clzg
+@@temp
+#define glass_ctzg      __builtin_ctzg
+@@temp
+#define glass_clzg2     __builtin_clzg
+@@temp
+#define glass_ctzg2     __builtin_ctzg
+
+#endif

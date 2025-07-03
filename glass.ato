@@ -1,0 +1,2238 @@
+// (c) 2025 shdown
+// This code is licensed under MIT license (see LICENSE.MIT for details)
+
+@@project GLASS
+
+@@require GLASS_N
+@@require GLASS_SIZE
+@@require GLASS_KEY
+@@require GLASS_K
+
+@@config
+#define GLASS_WITH_SSIZE 0
+
+#if GLASS_WITH_SSIZE
+@@require GLASS_SSIZE
+#endif
+
+@@config
+#define GLASS_WITH_TRASH_ENCODING 0
+
+@@config
+#define GLASS_WITH_ADD_NODE_MULTIPLE 1
+
+@@config
+#define GLASS_WITH_CACHE 1
+
+@@config
+#define GLASS_STATS_CALLBACK(Channel_, Value_) ((void) (Value_))
+
+@@config
+#define GLASS_WITH_FIRST_LAST_PTRS 1
+
+@@config
+#define GLASS_WITH_FIRST_LAST_PTRS_LAZY 1
+
+@@config
+#define GLASS_WITH_HT 1
+
+@@config
+#define GLASS_WITH_HT_PREV_PTR 1
+
+@@config
+#define GLASS_HT_MAX_LOOKUP_LEN 5
+
+@@config
+#define GLASS_WITH_HT_HEALTH_CHECKS 0
+
+@@config
+#define GLASS_WITH_ASM 0
+
+@@config
+#define GLASS_WITH_ASSERTS 0
+
+#if GLASS_WITH_ASSERTS
+@@temp
+#define GLASS__ASSERT(Expr_) assert(Expr_)
+#else
+@@temp
+#define GLASS__ASSERT(Expr_) ((void) 0)
+#endif
+
+#ifdef __cplusplus
+@@temp
+# define GLASS__STATIC_ASSERT(Name_, Expr_) static_assert((bool) (Expr_), #Name_)
+#else
+@@temp
+# define GLASS__STATIC_ASSERT(Name_, Expr_) typedef int Name_[(Expr_) ? 1 : -1] __attribute__((unused))
+#endif
+
+@@config
+#define GLASS_WITH_COMPAT_SHIM 0
+
+@@boilerplate
+
+@@config
+#define GLASS_ALLOCATOR @_default_allocator
+
+@~no_inline void *@_default_allocator(int op, void *p, size_t old_n, size_t new_n, size_t elem_sz)
+{
+    switch (op) {
+    case 0:
+        if (!new_n) {
+            free(p);
+            return NULL;
+        }
+        if (!old_n) {
+            return calloc_or_die(new_n, elem_sz);
+        }
+        p = realloc_or_die(p, new_n, elem_sz);
+        if (new_n > old_n) {
+            memset(
+                ((char *) p) + old_n * elem_sz,
+                0,
+                (new_n - old_n) * elem_sz);
+        }
+        return p;
+    case 1:
+        if (old_n) {
+            memset(p, 0, old_n * elem_sz);
+        }
+        return p;
+    default:
+        __builtin_unreachable();
+    }
+}
+
+@@include glass_c.inc
+
+enum { @_C = GLASS__C };
+
+enum {
+    @_LEFTOVER = GLASS_K % @_C,
+    @_ODD_CHUNK_WIDTH = @_LEFTOVER ? @_LEFTOVER : @_C,
+    @_NCHUNKS = (GLASS_K / @_C) + !!@_LEFTOVER,
+};
+
+enum {
+    @_CHANNEL_CACHE,
+    @_CHANNEL_GROW_VEC,
+    @_CHANNEL_HINT_CLIMB_UP,
+
+    @_CHANNEL_TDFIND_NEXTPREV,
+    @_CHANNEL_TDFIND_FIRSTLAST,
+    @_CHANNEL_QFIND_UP,
+    @_CHANNEL_QFIND_DOWN,
+
+    @_CHANNEL_ERASE,
+    @_CHANNEL_CLIMB_DOWN,
+    @_CHANNEL_SAMSARA,
+    @_CHANNEL_HT_LOOKUP,
+};
+
+@@include_once glass_int_generic.ato
+@@include_once glass_compat_shim.ato
+
+@@include_once glass_asm.ato
+@@include_once glass_mask.ato
+@@include_once glass_bitter.ato
+
+GLASS__STATIC_ASSERT(
+    @STATIC_ASSERT_K_in_limits,
+    GLASS_K <= sizeof(GLASS_KEY) * 8);
+
+GLASS__STATIC_ASSERT(
+    @STATIC_ASSERT_N_in_limits,
+    GLASS_N <= GLASS_MASK_BITS);
+
+GLASS__STATIC_ASSERT(
+    @STATIC_ASSERT_C_is_log2_N,
+    (1 << @_C) == GLASS_N);
+
+GLASS__STATIC_ASSERT(
+    @STATIC_ASSERT_NCHUNKS_greater_than_1,
+    @_NCHUNKS > 1);
+
+@@temp
+#define GLASS__MAX_POSSIBLE_KEY (((GLASS_KEY) -1) >> (sizeof(GLASS_KEY) * 8 - GLASS_K))
+
+#if GLASS_WITH_SSIZE
+
+typedef GLASS_SSIZE @_GLASS_SIZE_OR_FF;
+typedef GLASS_SSIZE @_GLASS_SIZE_OR_FF_FE;
+
+@@temp
+#define IS_FF(X_) ((X_) < 0)
+
+@@temp
+#define NOT_FF(X_) ((X_) >= 0)
+
+@@temp
+#define IS_FE(X_) ((X_) == -2)
+
+@@temp
+#define NEITHER_FF_NOR_FE(X_) ((X_) >= 0)
+
+#else
+
+typedef GLASS_SIZE @_GLASS_SIZE_OR_FF;
+typedef GLASS_SIZE @_GLASS_SIZE_OR_FF_FE;
+
+@@temp
+#define IS_FF(X_) ((X_) == (GLASS_SIZE) -1)
+
+@@temp
+#define NOT_FF(X_) ((X_) != (GLASS_SIZE) -1)
+
+@@temp
+#define IS_FE(X_) ((X_) == (GLASS_SIZE) -2)
+
+@@temp
+#define NEITHER_FF_NOR_FE(X_) ((X_) < (GLASS_SIZE) -2)
+
+#endif
+
+typedef struct {
+    @_MASK mask;
+    GLASS_SIZE children[GLASS_N];
+    @_GLASS_SIZE_OR_FF parent;
+
+#if GLASS_WITH_HT
+    @_GLASS_SIZE_OR_FF ht_next_i;
+# if GLASS_WITH_HT_PREV_PTR
+    @_GLASS_SIZE_OR_FF ht_prev_i;
+# endif
+    GLASS_KEY ht_k;
+#endif
+} @_Node;
+
+#if GLASS_WITH_CACHE
+typedef struct {
+    GLASS_SIZE ptrs[@_NCHUNKS];
+    GLASS_KEY last_k;
+    int ptrs_depth;
+} @_Cache;
+#endif
+
+typedef struct {
+    @_GLASS_SIZE_OR_FF_FE i;
+    GLASS_KEY k;
+} @Iter;
+
+@@temp
+#define GLASS__ITER_END {.i = (@_GLASS_SIZE_OR_FF_FE) -1}
+
+@~force_inline @Iter @end(void)
+{
+    return (@Iter) GLASS__ITER_END;
+}
+
+@~force_inline bool @iter_is_end(@Iter it)
+{
+    return IS_FF(it.i);
+}
+
+#if GLASS_WITH_HT
+
+typedef struct {
+    GLASS_SIZE mask;
+    @_GLASS_SIZE_OR_FF *i;
+} @_Ht;
+
+@~force_inline void @_ht_check_size(size_t n)
+{
+    (void) n;
+    GLASS__ASSERT(n);
+    GLASS__ASSERT((n & (n - 1)) == 0);
+    if (sizeof(GLASS_SIZE) < sizeof(size_t)) {
+        GLASS__ASSERT(n - 1 <= (GLASS_SIZE) -1);
+    }
+}
+
+@~force_inline void @_ht_init(@_Ht *ht, size_t n)
+{
+    @_ht_check_size(n);
+
+    ht->mask = n - 1;
+
+    ht->i = (@_GLASS_SIZE_OR_FF *) malloc_or_die(sizeof(@_GLASS_SIZE_OR_FF), n);
+    memset(ht->i, 0xff, sizeof(@_GLASS_SIZE_OR_FF) * n);
+}
+
+@~force_inline void @_ht_destroy(@_Ht *ht)
+{
+    free(ht->i);
+}
+
+@~force_inline void @_ht_clear(@_Ht *ht, bool shrink_mem)
+{
+    if (shrink_mem) {
+        ht->mask = 0;
+        ht->i = (@_GLASS_SIZE_OR_FF *) realloc_or_die(ht->i, sizeof(@_GLASS_SIZE_OR_FF), 1);
+    }
+    size_t n = ((size_t) ht->mask) + 1;
+    memset(ht->i, 0xff, sizeof(@_GLASS_SIZE_OR_FF) * n);
+}
+
+@~force_inline void @_ht_increase_size_move_elem(@_Node *nodes, @_Ht *ht, @_GLASS_SIZE_OR_FF *pj, GLASS_SIZE new_hash)
+{
+    @_GLASS_SIZE_OR_FF j = *pj;
+    @_Node *node = &nodes[j];
+
+    *pj = node->ht_next_i;
+    node->ht_next_i = ht->i[new_hash];
+
+#if GLASS_WITH_HT_PREV_PTR
+    node->ht_prev_i = -1;
+
+    @_GLASS_SIZE_OR_FF old_i = ht->i[new_hash];
+    if (NOT_FF(old_i)) {
+        nodes[old_i].ht_prev_i = j;
+    }
+#endif
+
+    ht->i[new_hash] = j;
+}
+
+@~force_inline @_GLASS_SIZE_OR_FF @_ht_increase_size_reverse_list(@_Node *nodes, @_GLASS_SIZE_OR_FF i)
+{
+    @_GLASS_SIZE_OR_FF prev = -1;
+    while (NOT_FF(i)) {
+        @_Node *x = &nodes[i];
+        @_GLASS_SIZE_OR_FF old_i = i;
+        i = x->ht_next_i;
+        x->ht_next_i = prev;
+#if GLASS_WITH_HT_PREV_PTR
+        x->ht_prev_i = i;
+#endif
+        prev = old_i;
+    }
+    return prev;
+}
+
+@~no_inline void @_ht_increase_size(@_Node *nodes, @_Ht *ht, size_t new_n)
+{
+    @_ht_check_size(new_n);
+
+    size_t old_n = ht->mask + (size_t) 1;
+
+    if (new_n <= old_n) {
+        return;
+    }
+
+    GLASS_SIZE new_mask = new_n - 1;
+    ht->mask = new_mask;
+
+    ht->i = (@_GLASS_SIZE_OR_FF *) realloc_or_die(ht->i, sizeof(@_GLASS_SIZE_OR_FF), new_n);
+
+    memset(ht->i + old_n, 0xff, (new_n - old_n) * sizeof(@_GLASS_SIZE_OR_FF));
+
+    for (size_t old_hash = 0; old_hash < old_n; ++old_hash) {
+        @_GLASS_SIZE_OR_FF *pj = &ht->i[old_hash];
+#if GLASS_WITH_HT_PREV_PTR
+        @_GLASS_SIZE_OR_FF last_kept = -1;
+#endif
+        for (;;) {
+            @_GLASS_SIZE_OR_FF j = *pj;
+            if (IS_FF(j)) {
+                break;
+            }
+            @_Node *node = &nodes[j];
+            GLASS_SIZE new_hash = node->ht_k & new_mask;
+            if (new_hash >= old_n) {
+                @_ht_increase_size_move_elem(nodes, ht, pj, new_hash);
+            } else {
+#if GLASS_WITH_HT_PREV_PTR
+                node->ht_prev_i = last_kept;
+                last_kept = j;
+#endif
+                pj = &node->ht_next_i;
+            }
+        }
+    }
+
+    for (size_t hash = old_n; hash < new_n; ++hash) {
+        ht->i[hash] = @_ht_increase_size_reverse_list(nodes, ht->i[hash]);
+    }
+}
+
+@~force_inline @_GLASS_SIZE_OR_FF_FE @_ht_lookup_raw(@_Node *nodes, @_Ht *ht, GLASS_KEY k)
+{
+    GLASS_KEY h = k & ht->mask;
+    @_GLASS_SIZE_OR_FF i = ht->i[h];
+
+    int left = GLASS_HT_MAX_LOOKUP_LEN;
+
+    while (NOT_FF(i)) {
+        @_Node *node = &nodes[i];
+        if (node->ht_k == k) {
+            GLASS_STATS_CALLBACK(@_CHANNEL_HT_LOOKUP, 2);
+            return i;
+        }
+        if (!--left) {
+            GLASS_STATS_CALLBACK(@_CHANNEL_HT_LOOKUP, 1);
+            return -1;
+        }
+        i = node->ht_next_i;
+    }
+    GLASS_STATS_CALLBACK(@_CHANNEL_HT_LOOKUP, 0);
+    return -2;
+}
+
+@~force_inline @_GLASS_SIZE_OR_FF_FE @_ht_lookup(@_Node *nodes, @_Ht *ht, GLASS_KEY k)
+{
+    return @_ht_lookup_raw(nodes, ht, k >> @_C);
+}
+
+@~force_inline void @_ht_insert_new_raw(@_Node *nodes, @_Ht *ht, GLASS_KEY k, GLASS_SIZE i)
+{
+    GLASS_KEY h = k & ht->mask;
+    @_GLASS_SIZE_OR_FF old_i = ht->i[h];
+
+    @_Node *node = &nodes[i];
+    node->ht_k = k;
+    node->ht_next_i = old_i;
+#if GLASS_WITH_HT_PREV_PTR
+    node->ht_prev_i = -1;
+    if (NOT_FF(old_i)) {
+        nodes[old_i].ht_prev_i = i;
+    }
+#endif
+
+    ht->i[h] = i;
+}
+
+@~force_inline void @_ht_insert_new(@_Node *nodes, @_Ht *ht, GLASS_KEY k, GLASS_SIZE i)
+{
+    @_Node *node = &nodes[i];
+    int chunk = @_bitter_k_extract_postleaf(k);
+    if (@_mask_nonzero_without_E(node->mask, chunk)) {
+        return;
+    }
+
+    @_ht_insert_new_raw(nodes, ht, k >> @_C, i);
+}
+
+@~force_inline void @_ht_remove_raw(@_Node *nodes, @_Ht *ht, GLASS_KEY k, GLASS_SIZE i)
+{
+#if GLASS_WITH_HT_PREV_PTR
+    @_Node *node = &nodes[i];
+    @_GLASS_SIZE_OR_FF next_i = node->ht_next_i;
+    @_GLASS_SIZE_OR_FF prev_i = node->ht_prev_i;
+    if (NOT_FF(next_i)) {
+        nodes[next_i].ht_prev_i = prev_i;
+    }
+    if (NOT_FF(prev_i)) {
+        nodes[prev_i].ht_next_i = next_i;
+    } else {
+        GLASS_KEY h = k & ht->mask;
+        ht->i[h] = next_i;
+    }
+
+#else
+    GLASS_KEY h = k & ht->mask;
+    @_GLASS_SIZE_OR_FF *pj = &ht->i[h];
+    for (;;) {
+        @_GLASS_SIZE_OR_FF j = *pj;
+        GLASS__ASSERT(NOT_FF(j));
+        @_Node *node = &nodes[j];
+        if (j == i) {
+            *pj = node->ht_next_i;
+            break;
+        }
+        pj = &node->ht_next_i;
+    }
+#endif
+}
+
+@~force_inline void @_ht_remove(@_Node *nodes, @_Ht *ht, GLASS_KEY k, GLASS_SIZE i)
+{
+    @_ht_remove_raw(nodes, ht, k >> @_C, i);
+}
+
+#endif
+
+typedef struct {
+    @_Node *nodes;
+    @_GLASS_SIZE_OR_FF root;
+    size_t nodes_capacity;
+    size_t size;
+    @_GLASS_SIZE_OR_FF first_free_node;
+#if GLASS_WITH_CACHE
+    @_Cache cache;
+#endif
+#if GLASS_WITH_FIRST_LAST_PTRS
+    @Iter first_ptr;
+    @Iter last_ptr;
+#endif
+#if GLASS_WITH_HT
+    @_Ht ht;
+#endif
+} @Glass;
+
+#if GLASS_WITH_HT && GLASS__C <= 8
+
+typedef struct {
+    @_GLASS_SIZE_OR_FF i;
+    uint8_t k_postleaf;
+} @ZIter;
+
+@~force_inline bool @Z_is_end(@ZIter it)
+{
+    return IS_FF(it.i);
+}
+
+@~force_inline @ZIter @Z_end(void)
+{
+    return (@ZIter) GLASS__ITER_END;
+}
+
+@~force_inline @ZIter @iter_to_Z(@Iter it)
+{
+    return (@ZIter) {
+        .i = it.i,
+        .k_postleaf = (uint8_t) @_bitter_k_extract_postleaf(it.k),
+    };
+}
+
+@~force_inline GLASS_SIZE *@Z_get_ptr_to_value(@Glass *g, @ZIter it)
+{
+    return &g->nodes[it.i].children[it.k_postleaf];
+}
+
+@~force_inline @Iter @iter_from_Z_valid(@Glass *g, @ZIter it)
+{
+    return (@Iter) {
+        .i = it.i,
+        .k = (g->nodes[it.i].ht_k << @_C) | it.k_postleaf,
+    };
+}
+
+@~force_inline @Iter @iter_from_Z(@Glass *g, @ZIter it)
+{
+    if (IS_FF(it.i)) {
+        return (@Iter) GLASS__ITER_END;
+    }
+    return @iter_from_Z_valid(g, it);
+}
+#endif
+
+#if GLASS_WITH_HT
+@~force_inline size_t @_ht_policy_n_from_capacity(size_t capacity)
+{
+    if (!capacity) {
+        return 1;
+    }
+
+    int nbits = sizeof(size_t) * 8 - 1 - glass_clzg(capacity);
+
+    enum {
+        MASK_BITS_MAX = sizeof(GLASS_SIZE) * 8,
+        SIZE_T_SHIFT_MAX = sizeof(size_t) * 8 - 1,
+        NBITS_MAX = MASK_BITS_MAX > SIZE_T_SHIFT_MAX ? MASK_BITS_MAX : SIZE_T_SHIFT_MAX,
+    };
+
+    if (nbits > NBITS_MAX) {
+        nbits = NBITS_MAX;
+    }
+
+    return ((size_t) 1) << nbits;
+}
+
+@~force_inline void @_ht_policy_maybe_incrase_size(@Glass *g)
+{
+    size_t new_n = @_ht_policy_n_from_capacity(g->nodes_capacity);
+    size_t old_n = g->ht.mask + (size_t) 1;
+
+    if (new_n > old_n) {
+        @_ht_increase_size(g->nodes, &g->ht, new_n);
+    }
+}
+
+#if GLASS_WITH_HT_HEALTH_CHECKS
+@~force_inline @_GLASS_SIZE_OR_FF @_ht_health_check_find_node(@Glass *g, GLASS_KEY k)
+{
+    @_BitPos bit_pos = @_bit_pos_from_root();
+    @_GLASS_SIZE_OR_FF i = g->root;
+    if (IS_FF(i)) {
+        return -1;
+    }
+    @_Node *nodes = g->nodes;
+    for (;;) {
+        if (@_bit_pos_is_leaf(bit_pos)) {
+            return i;
+        }
+        @_Node *x = &nodes[i];
+        int B = @_bitter_k_select_chunk(k, bit_pos);
+        if (!@_mask_test_bit(x->mask, B)) {
+            return -1;
+        }
+        i = x->children[B];
+        bit_pos = @_bit_pos_down(bit_pos);
+    }
+}
+
+@~no_inline void @_ht_health_check(@Glass *g, int delta_glass_size)
+{
+    @_Ht *ht = &g->ht;
+    @_Node *nodes = g->nodes;
+
+    GLASS_SIZE mask = ht->mask;
+    size_t ht_n = mask + (size_t) 1;
+
+    size_t new_g_size = g->size + delta_glass_size;
+
+    size_t visited = 0;
+    for (size_t hash = 0; hash < ht_n; ++hash) {
+        @_GLASS_SIZE_OR_FF j = ht->i[hash];
+        @_GLASS_SIZE_OR_FF prev = -1;
+        size_t chain_len = 0;
+        while (NOT_FF(j)) {
+            @_Node *node = &nodes[j];
+            assert((node->ht_k & mask) == hash);
+            @_GLASS_SIZE_OR_FF j2 = @_ht_health_check_find_node(g, node->ht_k << @_C);
+            assert(j2 == j);
+            node->ht_k = ~node->ht_k;
+            ++visited;
+            ++chain_len;
+            assert(visited <= new_g_size);
+            assert(chain_len <= new_g_size);
+
+#if GLASS_WITH_HT_PREV_PTR
+            assert(node->ht_prev_i == prev);
+            prev = j;
+#endif
+            j = node->ht_next_i;
+        }
+    }
+    assert(visited <= new_g_size);
+
+    size_t visited2 = 0;
+    for (size_t hash = 0; hash < ht_n; ++hash) {
+        @_GLASS_SIZE_OR_FF j = ht->i[hash];
+        while (NOT_FF(j)) {
+            @_Node *node = &nodes[j];
+            assert(((node->ht_k ^ ~hash) & mask) == 0);
+            node->ht_k = ~node->ht_k;
+            assert((node->ht_k & mask) == hash);
+            ++visited2;
+            j = node->ht_next_i;
+        }
+    }
+    assert(visited2 == visited);
+}
+#else
+@~force_inline void @_ht_health_check(@Glass *g, int delta_glass_size)
+{
+    (void) g;
+    (void) delta_glass_size;
+}
+#endif
+
+#endif
+
+@@temp
+#define GLASS__TRASH_NEXT_FREE_NODE_PTR(X_) ((X_)->children[0])
+
+@~force_inline void @_trash_store(@_Node *x, @_GLASS_SIZE_OR_FF i)
+{
+#if GLASS_WITH_TRASH_ENCODING
+    GLASS__TRASH_NEXT_FREE_NODE_PTR(x) = i + 2u;
+#else
+    GLASS__TRASH_NEXT_FREE_NODE_PTR(x) = i;
+#endif
+}
+
+@~force_inline @_GLASS_SIZE_OR_FF @_trash_load(@_Node *x, GLASS_SIZE xi)
+{
+#if GLASS_WITH_TRASH_ENCODING
+    GLASS_SIZE j = GLASS__TRASH_NEXT_FREE_NODE_PTR(x);
+    if (!j) {
+        return xi + 1;
+    }
+    return j - 2u;
+#else
+    (void) xi;
+    return GLASS__TRASH_NEXT_FREE_NODE_PTR(x);
+#endif
+}
+
+@~force_inline @_GLASS_SIZE_OR_FF @_make_nodes_available(@Glass *g, size_t from, size_t to, @_GLASS_SIZE_OR_FF old_first_free_node)
+{
+    if (from == to) {
+        return old_first_free_node;
+    }
+#if GLASS_WITH_TRASH_ENCODING
+    @_trash_store(&g->nodes[to - 1], old_first_free_node);
+#else
+    @_Node *x = &g->nodes[from];
+    size_t i = from;
+    for (;;) {
+        size_t i_next = i + 1;
+        if (i_next == to) {
+            break;
+        }
+        @_trash_store(x, i_next);
+        i = i_next;
+        ++x;
+    }
+    @_trash_store(x, old_first_free_node);
+#endif
+    return from;
+}
+
+#if GLASS_WITH_SSIZE
+@@temp
+# define GLASS__MAX_CAPACITY (((GLASS_SIZE) 1) << (sizeof(GLASS_SIZE) * 8 - 1))
+#else
+@@temp
+# define GLASS__MAX_CAPACITY ((GLASS_SIZE) -2)
+#endif
+
+@~inline void @create(@Glass *g, size_t prealloc)
+{
+    if (unlikely(prealloc > GLASS__MAX_CAPACITY)) {
+        fprintf(
+            stderr, "FATAL: %s: create: prealloc=%zu > max capacity=%zu.\n",
+            GLASS_STRINGIFY(GLASS_PREFIX),
+            prealloc,
+            (size_t) GLASS__MAX_CAPACITY);
+        abort();
+    }
+    g->nodes = (@_Node *) GLASS_ALLOCATOR(0, NULL, 0, prealloc, sizeof(@_Node));
+    g->root = -1;
+    g->nodes_capacity = prealloc;
+    g->size = 0;
+    g->first_free_node = @_make_nodes_available(g, 0, prealloc, -1);
+
+#if GLASS_WITH_HT
+    @_ht_init(&g->ht, @_ht_policy_n_from_capacity(prealloc));
+#endif
+
+#if GLASS_WITH_CACHE
+    g->cache = (@_Cache) {0};
+#endif
+
+#if GLASS_WITH_FIRST_LAST_PTRS
+    g->first_ptr = (@Iter) GLASS__ITER_END;
+    g->last_ptr = (@Iter) GLASS__ITER_END;
+#endif
+
+#if GLASS_WITH_HT
+    @_ht_health_check(g, 0);
+#endif
+}
+
+@~inline void @create_moved_out(@Glass *g)
+{
+    *g = (@Glass) {0};
+}
+
+@~inline void @destroy(@Glass *g)
+{
+#if GLASS_WITH_HT
+    @_ht_destroy(&g->ht);
+#endif
+    GLASS_ALLOCATOR(0, g->nodes, g->nodes_capacity, 0, sizeof(@_Node));
+}
+
+@~force_no_inline void @_grow_vec_to(@Glass *g, size_t new_c)
+{
+    GLASS_STATS_CALLBACK(@_CHANNEL_GROW_VEC, 0);
+
+    size_t old_c = g->nodes_capacity;
+
+    GLASS__ASSERT(new_c > old_c);
+
+    g->nodes = (@_Node *) GLASS_ALLOCATOR(0, g->nodes, old_c, new_c, sizeof(@_Node));
+    g->nodes_capacity = new_c;
+    g->first_free_node = @_make_nodes_available(g, old_c, new_c, g->first_free_node);
+
+#if GLASS_WITH_HT
+    @_ht_policy_maybe_incrase_size(g);
+    @_ht_health_check(g, 0);
+#endif
+
+    return;
+}
+
+@~force_no_inline void @_grow_vec_default(@Glass *g)
+{
+    GLASS_SIZE old_c = g->nodes_capacity;
+
+    GLASS_SIZE new_c = old_c;
+    if (!new_c) {
+        new_c = 1;
+    } else {
+        if (unlikely(__builtin_mul_overflow(new_c, (GLASS_SIZE) 2, &new_c))) {
+            new_c = -1;
+        }
+        if (new_c >= GLASS__MAX_CAPACITY) {
+            new_c = GLASS__MAX_CAPACITY;
+        }
+        if (unlikely(new_c == old_c)) {
+            fprintf(
+                stderr, "FATAL: %s: _grow_vec_default: new capacity would be greater than max capacity=%zu.\n",
+                GLASS_STRINGIFY(GLASS_PREFIX),
+                (size_t) GLASS__MAX_CAPACITY);
+            abort();
+        }
+    }
+    @_grow_vec_to(g, new_c);
+}
+
+@~inline void @clear(@Glass *g, bool shrink_mem)
+{
+#if GLASS_WITH_HT
+    @_ht_clear(&g->ht, shrink_mem);
+#endif
+
+    if (shrink_mem) {
+        GLASS_ALLOCATOR(0, g->nodes, g->nodes_capacity, 0, sizeof(@_Node));
+        g->nodes = NULL;
+        g->nodes_capacity = 0;
+        g->first_free_node = -1;
+    } else {
+        g->nodes = (@_Node *) GLASS_ALLOCATOR(1, g->nodes, g->nodes_capacity, g->nodes_capacity, sizeof(@_Node));
+        g->first_free_node = @_make_nodes_available(g, 0, g->nodes_capacity, -1);
+    }
+
+    g->size = 0;
+    g->root = -1;
+
+#if GLASS_WITH_CACHE
+    g->cache.ptrs_depth = 0;
+#endif
+
+#if GLASS_WITH_FIRST_LAST_PTRS
+    g->first_ptr = (@Iter) GLASS__ITER_END;
+    g->last_ptr = (@Iter) GLASS__ITER_END;
+#endif
+
+#if GLASS_WITH_HT
+    @_ht_health_check(g, 0);
+#endif
+}
+
+@~force_inline void @_init_node(@Glass *g, @_Node *x, GLASS_SIZE xi, @_GLASS_SIZE_OR_FF parent)
+{
+    g->first_free_node = @_trash_load(x, xi);
+
+    // No need: when we remove a node, the mask is guaranteed to be empty.
+    // A freshly-allocated space is zeroed, and all zeros is a valid empty mask.
+    //x->mask = @_mask_new_empty();
+
+    x->parent = parent;
+}
+
+@~force_inline @_GLASS_SIZE_OR_FF @_add_node_immediate_nonroot(@Glass *g, @_Node *nodes, @_GLASS_SIZE_OR_FF parent)
+{
+    @_GLASS_SIZE_OR_FF i = g->first_free_node;
+    if (unlikely(IS_FF(i))) {
+        return i;
+    }
+
+    @_Node *x = &nodes[i];
+
+    @_init_node(g, x, i, parent);
+
+    return i;
+}
+
+@~force_inline GLASS_SIZE @_add_node(@Glass *g, @_GLASS_SIZE_OR_FF parent, bool is_root)
+{
+    @_GLASS_SIZE_OR_FF i = g->first_free_node;
+    if (unlikely(IS_FF(i))) {
+        @_grow_vec_default(g);
+        i = g->first_free_node;
+    }
+
+    @_Node *x = &g->nodes[i];
+
+    @_init_node(g, x, i, parent);
+
+    if (is_root) {
+        g->root = i;
+    }
+
+    return i;
+}
+
+#if GLASS_WITH_ADD_NODE_MULTIPLE
+@~force_inline bool @_add_node_multiple_nonroot(
+        @Glass *g,
+        @_Node *nodes,
+        @_GLASS_SIZE_OR_FF parent,
+        GLASS_SIZE *out,
+        size_t n)
+{
+    if (!n) {
+        return true;
+    }
+
+    @_GLASS_SIZE_OR_FF J = g->first_free_node;
+    size_t i = 0;
+    for (; i < n; ++i) {
+        if (unlikely(IS_FF(J))) {
+            goto fallback;
+        }
+        out[i] = J;
+        @_Node *x = &nodes[J];
+        x->parent = parent;
+        parent = J;
+        J = @_trash_load(x, J);
+    }
+    g->first_free_node = J;
+    return true;
+
+fallback:
+    g->first_free_node = -1;
+    for (; i < n; ++i) {
+        J = @_add_node_immediate_nonroot(g, nodes, parent);
+        if (IS_FF(J)) {
+            J = @_add_node(g, parent, false);
+            nodes = g->nodes;
+        }
+        parent = J;
+        out[i] = J;
+    }
+    return false;
+}
+#endif
+
+@~force_inline void @_remove_node(@Glass *g, @_Node *nodes, size_t i)
+{
+    @_trash_store(&nodes[i], g->first_free_node);
+    g->first_free_node = i;
+}
+
+#if GLASS_WITH_CACHE
+@~force_inline int @_from_cache(@Glass *g, GLASS_KEY k)
+{
+    int cache_depth = g->cache.ptrs_depth;
+    int chunks_eq = @_bitter_common_chunks(g->cache.last_k, k);
+    int res = chunks_eq < cache_depth ? chunks_eq : cache_depth;
+    GLASS_STATS_CALLBACK(@_CHANNEL_CACHE, res);
+    return res;
+}
+#endif
+
+// Fixed-k iterator, may move both up and down, but 'k' is never changed
+typedef struct {
+    GLASS_SIZE i;
+    GLASS_KEY k;
+    @_BitPos bit_pos;
+} @_IterF;
+
+enum {
+    @_FLAG_FORCE_DUMB        = 1 << 0,
+    @_FLAG_UPDATE_PTR        = 1 << 1,
+};
+
+@~force_inline int @_F_hint_depth(@Iter hint, GLASS_KEY k)
+{
+    if (@iter_is_end(hint)) {
+        return 0;
+    }
+    return @_bitter_common_chunks(hint.k, k);
+}
+
+@~force_inline GLASS_SIZE @_F_hint_i(@Glass *g, @Iter hint, int depth)
+{
+    GLASS_SIZE i = hint.i;
+    int n = @_NCHUNKS - 1 - depth;
+
+    @_Node *nodes = g->nodes;
+    for (int j = 0; j < n; ++j) {
+        i = nodes[i].parent;
+    }
+
+    GLASS_STATS_CALLBACK(@_CHANNEL_HINT_CLIMB_UP, n < 0 ? 0 : n);
+
+    return i;
+}
+
+#if GLASS_WITH_CACHE
+@~inline bool @_template_F_from_cache(@Glass *g, GLASS_KEY k, @_IterF *F, const @Iter *hint)
+{
+    // 'd_c' is the depth from cache.
+    int d_c = @_from_cache(g, k);
+
+    // 'd' is the resulting depth.
+    int d;
+    // 'i' is the resulting node index.
+    GLASS_SIZE i;
+
+    if (hint) {
+        // 'd_h' is the depth from the hint
+        int d_h = @_F_hint_depth(*hint, k);
+        if (d_h > d_c) {
+            // Since we know d_h > d_c, we also know d_h != 0.
+            d = d_h;
+            i = @_F_hint_i(g, *hint, d_h);
+        } else {
+            // Try to use the cache; if there's none, bail out and return false.
+            if (!d_c) {
+                return false;
+            }
+            d = d_c;
+            i = g->cache.ptrs[d_c - 1];
+        }
+    } else {
+        // Try to use the cache; if there's none, bail out and return false.
+        if (!d_c) {
+            return false;
+        }
+        d = d_c;
+        i = g->cache.ptrs[d_c - 1];
+    }
+
+    *F = (@_IterF) {
+        .i = i,
+        .k = k,
+        .bit_pos = @_bit_pos_from_depth(d),
+    };
+    return true;
+}
+#endif
+
+@~force_inline bool @_template_F_from_root(@Glass *g, GLASS_KEY k, @_IterF *F, const @Iter *hint)
+{
+    @_GLASS_SIZE_OR_FF i;
+    @_BitPos bit_pos;
+
+    if (hint) {
+        int depth = @_F_hint_depth(*hint, k);
+        if (!depth) {
+            goto return_root;
+        }
+        i = @_F_hint_i(g, *hint, depth);
+        bit_pos = @_bit_pos_from_depth(depth);
+    } else {
+return_root:
+        i = g->root;
+        if (IS_FF(i)) {
+            return false;
+        }
+        bit_pos = @_bit_pos_from_root();
+    }
+
+    *F = (@_IterF) {
+        .i = (GLASS_SIZE) i,
+        .k = k,
+        .bit_pos = bit_pos,
+    };
+    return true;
+}
+
+@~force_inline @_IterF @_F_create_root(@Glass *g, GLASS_KEY k)
+{
+    GLASS_SIZE i = @_add_node(g, -1, true);
+    return (@_IterF) {
+        .i = i,
+        .k = k,
+        .bit_pos = @_bit_pos_from_root(),
+    };
+}
+
+@~force_inline @_IterF @_F_from_I(@Iter it)
+{
+    return (@_IterF) {
+        .i = (GLASS_SIZE) it.i,
+        .k = it.k,
+        .bit_pos = @_bit_pos_from_leaf(),
+    };
+}
+
+@~force_inline void @_F_down(@_Node *x, @_IterF *F, int B)
+{
+    *F = (@_IterF) {
+        .i = x->children[B],
+        .k = F->k,
+        .bit_pos = @_bit_pos_down(F->bit_pos),
+    };
+}
+
+@~force_inline void @_F_down_assign(@_Node *x, @_IterF *F, int B, GLASS_SIZE j)
+{
+    x->children[B] = j;
+    *F = (@_IterF) {
+        .i = j,
+        .k = F->k,
+        .bit_pos = @_bit_pos_down(F->bit_pos),
+    };
+}
+
+@~force_inline int @_F_part(@_IterF *F)
+{
+    return @_bitter_k_select_chunk(F->k, F->bit_pos);
+}
+
+@~force_inline bool @_F_is_leaf(@_IterF *F)
+{
+    return @_bit_pos_is_leaf(F->bit_pos);
+}
+
+@~force_inline bool @_F_up(@_Node *nodes, @_IterF *F)
+{
+    @_GLASS_SIZE_OR_FF parent = nodes[F->i].parent;
+    if (IS_FF(parent)) {
+        return false;
+    }
+    *F = (@_IterF) {
+        .i = (GLASS_SIZE) parent,
+        .k = F->k,
+        .bit_pos = @_bit_pos_up(F->bit_pos),
+    };
+    return true;
+}
+
+@~force_inline @Iter @_F_finalize(@_IterF *F)
+{
+    return (@Iter) {
+        .i = (@_GLASS_SIZE_OR_FF_FE) F->i,
+        .k = F->k,
+    };
+}
+
+// Iterator where k is built iteratively top-down
+typedef struct {
+    GLASS_SIZE i;
+    GLASS_KEY k;
+    @_BitPos bit_pos;
+} @_IterTD;
+
+@~force_inline bool @_TD_from_root(@Glass *g, @_IterTD *TD)
+{
+    @_GLASS_SIZE_OR_FF root = g->root;
+    if (IS_FF(root)) {
+        return false;
+    }
+    *TD = (@_IterTD) {
+        .i = (GLASS_SIZE) root,
+        .k = 0,
+        .bit_pos = @_bit_pos_from_root(),
+    };
+    return true;
+}
+
+#if GLASS_WITH_CACHE
+@~inline bool @_TD_from_cache(@Glass *g, @_IterTD *TD, GLASS_KEY k_start, bool lazy)
+{
+    int nchunks = @_from_cache(g, k_start);
+    if (!nchunks) {
+        return false;
+    }
+
+    @_BitPos bit_pos = @_bit_pos_from_depth(nchunks);
+    *TD = (@_IterTD) {
+        .i = g->cache.ptrs[nchunks - 1],
+        .k = lazy ? k_start : @_bitter_k_zero_lsb_including_this_maybe_postleaf_non_root(k_start, bit_pos),
+        .bit_pos = bit_pos,
+    };
+    return true;
+}
+#endif
+
+@~force_inline void @_TD_down(@_Node *x, @_IterTD *TD, int B)
+{
+    @_BitPos bit_pos = TD->bit_pos;
+    *TD = (@_IterTD) {
+        .i = x->children[B],
+        .k = @_bitter_k_insert_chunk(TD->k, B, bit_pos),
+        .bit_pos = @_bit_pos_down(bit_pos),
+    };
+}
+
+@~force_inline bool @_TD_is_leaf(@_IterTD *TD)
+{
+    return @_bit_pos_is_leaf(TD->bit_pos);
+}
+
+@~force_inline @Iter @_TD_finalize(@_IterTD *TD, int B)
+{
+    return (@Iter) {
+        .i = (@_GLASS_SIZE_OR_FF_FE) TD->i,
+        .k = @_bitter_k_insert_postleaf(TD->k, B),
+    };
+}
+
+@~force_inline @Iter @_TD_finalize_postleaf(@_IterTD *TD)
+{
+    return (@Iter) {
+        .i = (@_GLASS_SIZE_OR_FF_FE) TD->i,
+        .k = TD->k,
+    };
+}
+
+#if GLASS_WITH_CACHE
+@~force_inline int @_F_insert_cache_begin(@Glass *g, @_IterF *F)
+{
+    g->cache.last_k = F->k;
+    return @_bit_pos_to_depth(F->bit_pos);
+}
+
+@~force_inline int @_F_insert_cache_entry(@Glass *g, @_IterF *F, int depth)
+{
+    g->cache.ptrs[depth] = F->i;
+    return depth + 1;
+}
+
+@~force_inline void @_F_insert_cache_entry_postleaf(@Glass *g, @_IterF *F, int depth)
+{
+    g->cache.ptrs[depth] = F->i;
+    g->cache.ptrs_depth = depth + 1;
+}
+
+@~force_inline void @_F_insert_cache_entry_bail_out(@Glass *g, @_IterF *F, int depth)
+{
+    (void) F;
+    g->cache.ptrs_depth = depth;
+}
+
+#endif
+
+#if GLASS_WITH_FIRST_LAST_PTRS && GLASS_WITH_FIRST_LAST_PTRS_LAZY
+
+@@temp
+#define GLASS__ITER_BAD {.i = (@_GLASS_SIZE_OR_FF_FE) -2}
+
+@~force_inline bool @_iter_is_bad(@Iter it)
+{
+    return IS_FE(it.i);
+}
+
+#endif
+
+@~force_inline @Iter @_template_TDfind_first_or_last(@Glass *g, @_IterTD TD, bool is_first)
+{
+    @_Node *nodes = g->nodes;
+
+    for (int n = 1; ; ++n) {
+        @_Node *x = &nodes[TD.i];
+
+        int B = @_mask_find_firstlast(x->mask, is_first);
+
+        if (@_TD_is_leaf(&TD)) {
+            GLASS_STATS_CALLBACK(@_CHANNEL_TDFIND_FIRSTLAST, n);
+            return @_TD_finalize(&TD, B);
+        }
+
+        @_TD_down(x, &TD, B);
+    }
+}
+
+@~force_inline @Iter @_template_find_first_or_last(@Glass *g, bool is_first, int flags)
+{
+    (void) flags;
+
+#if GLASS_WITH_FIRST_LAST_PTRS
+    if (!(flags & @_FLAG_FORCE_DUMB)) {
+        @Iter it = is_first ? g->first_ptr : g->last_ptr;
+# if GLASS_WITH_FIRST_LAST_PTRS_LAZY
+        if (!@_iter_is_bad(it)) {
+            return it;
+        }
+# else
+        return it;
+# endif
+    }
+#endif
+
+    @_IterTD TD = {0};
+
+    @Iter res;
+
+#if GLASS_WITH_CACHE
+    if (@_TD_from_cache(g, &TD, is_first ? 0 : GLASS__MAX_POSSIBLE_KEY, false)) {
+        if (@_bit_pos_is_postleaf(TD.bit_pos)) {
+            res = @_TD_finalize_postleaf(&TD);
+            goto done;
+        }
+    } else {
+        if (!@_TD_from_root(g, &TD)) {
+            res = (@Iter) GLASS__ITER_END;
+            goto done;
+        }
+    }
+#else
+    if (!@_TD_from_root(g, &TD)) {
+        res = (@Iter) GLASS__ITER_END;
+        goto done;
+    }
+#endif
+
+    res = @_template_TDfind_first_or_last(g, TD, is_first);
+
+done:
+#if GLASS_WITH_FIRST_LAST_PTRS && GLASS_WITH_FIRST_LAST_PTRS_LAZY
+    if (flags & @_FLAG_UPDATE_PTR) {
+        if (is_first) {
+            g->first_ptr = res;
+        } else {
+            g->last_ptr = res;
+        }
+    }
+#endif
+    return res;
+}
+
+// An iterator which may go up and down, with 'k' altering in the process of this.
+typedef struct {
+    GLASS_SIZE i;
+    GLASS_KEY cur_k;
+    @_BitPos bit_pos;
+} @_IterQ;
+
+@~force_inline @_IterQ @_Q_from_I(@Iter it, int *P)
+{
+    return (@_IterQ) {
+        .i = (GLASS_SIZE) it.i,
+        .cur_k = @_bitter_k_split_postleaf(it.k, P),
+        .bit_pos = @_bit_pos_from_leaf(),
+    };
+}
+
+@~force_inline void @_Q_down(@_Node *x, @_IterQ *Q, int B)
+{
+    @_BitPos bit_pos = Q->bit_pos;
+    *Q = (@_IterQ) {
+        .i = x->children[B],
+        .cur_k = @_bitter_k_insert_chunk(Q->cur_k, B, bit_pos),
+        .bit_pos = @_bit_pos_down(bit_pos),
+    };
+}
+
+@~force_inline bool @_Q_up(@_Node *nodes, @_IterQ *Q, int *P)
+{
+    @_GLASS_SIZE_OR_FF parent = nodes[Q->i].parent;
+    if (IS_FF(parent)) {
+        return false;
+    }
+    @_BitPos new_bit_pos = @_bit_pos_up(Q->bit_pos);
+    *Q = (@_IterQ) {
+        .i = (GLASS_SIZE) parent,
+        .cur_k = @_bitter_k_split_chunk(Q->cur_k, new_bit_pos, P),
+        .bit_pos = new_bit_pos,
+    };
+    return true;
+}
+
+@~force_inline bool @_Q_up_nocommit(@_Node *nodes, @_IterQ *Q, int *P)
+{
+    @_GLASS_SIZE_OR_FF parent = nodes[Q->i].parent;
+    if (IS_FF(parent)) {
+        return false;
+    }
+    GLASS_KEY k = Q->cur_k;
+    @_BitPos new_bit_pos = @_bit_pos_up(Q->bit_pos);
+    *P = @_bitter_k_select_chunk(k, new_bit_pos);
+    *Q = (@_IterQ) {
+        .i = (GLASS_SIZE) parent,
+        .cur_k = k,
+        .bit_pos = new_bit_pos,
+    };
+    return true;
+}
+
+@~force_inline void @_Q_commit(@_IterQ *Q)
+{
+    Q->cur_k = @_bitter_k_zero_lsb_including_this(Q->cur_k, Q->bit_pos);
+}
+
+@~force_inline @Iter @_Q_finalize(@_IterQ *Q, int B)
+{
+    return (@Iter) {
+        .i = (@_GLASS_SIZE_OR_FF_FE) Q->i,
+        .k = @_bitter_k_insert_postleaf(Q->cur_k, B),
+    };
+}
+
+@~force_inline bool @_Q_is_leaf(@_IterQ *Q)
+{
+    return @_bit_pos_is_leaf(Q->bit_pos);
+}
+
+@~force_inline @Iter @_template_Qfind(@Glass *g, bool is_next, @_IterQ Q, int P)
+{
+    @_Node *nodes = g->nodes;
+
+    // go up
+
+    @_Node *x;
+
+    for (int n = 1; ; ++n) {
+        x = &nodes[Q.i];
+
+        P = @_mask_find_nextprev(x->mask, P, is_next, true);
+
+        if (GLASS__MASK_IDX_VALID(P)) {
+            GLASS_STATS_CALLBACK(@_CHANNEL_QFIND_UP, n);
+            break;
+        } else {
+            if (!@_Q_up_nocommit(nodes, &Q, &P)) {
+                GLASS_STATS_CALLBACK(@_CHANNEL_QFIND_UP, n);
+                return (@Iter) GLASS__ITER_END;
+            }
+        }
+    }
+
+    @_Q_commit(&Q);
+
+    // go down
+
+    for (int n = 1; ; ++n) {
+        if (@_Q_is_leaf(&Q)) {
+            GLASS_STATS_CALLBACK(@_CHANNEL_QFIND_DOWN, n);
+            return @_Q_finalize(&Q, P);
+        } else {
+            @_Q_down(x, &Q, P);
+        }
+
+        x = &nodes[Q.i];
+
+        P = @_mask_find_firstlast(x->mask, is_next);
+    }
+}
+
+@~force_inline @Iter @_template_iter_next_or_prev(@Glass *g, bool is_next, @Iter it, int flags)
+{
+    if (@iter_is_end(it)) {
+        if (is_next) {
+            __builtin_unreachable();
+        } else {
+            return @_template_find_first_or_last(g, false, flags & (@_FLAG_FORCE_DUMB | @_FLAG_UPDATE_PTR));
+        }
+    }
+
+    int P;
+    @_IterQ Q = @_Q_from_I(it, &P);
+
+    @Iter res = @_template_Qfind(g, is_next, Q, P);
+
+#if GLASS_WITH_FIRST_LAST_PTRS && GLASS_WITH_FIRST_LAST_PTRS_LAZY
+    if ((flags & @_FLAG_UPDATE_PTR) && @iter_is_end(res)) {
+        if (is_next) {
+            g->last_ptr = it;
+        } else {
+            g->first_ptr = it;
+        }
+    }
+#endif
+    return res;
+}
+
+#if GLASS_WITH_FIRST_LAST_PTRS
+@~force_inline void @_update_first_or_last_ptr(@Iter *ptr, @Iter it, bool is_first)
+{
+#if GLASS_WITH_FIRST_LAST_PTRS_LAZY
+    if (@_iter_is_bad(*ptr)) {
+        return;
+    }
+#endif
+    if (@iter_is_end(*ptr) || (is_first ? (it.k <= ptr->k) : (it.k >= ptr->k))) {
+        *ptr = it;
+    }
+}
+#endif
+
+#if GLASS_WITH_HT
+@~force_inline int @_F_from_ht(@Glass *g, GLASS_KEY k, @_IterF *F)
+{
+    @_GLASS_SIZE_OR_FF_FE i = @_ht_lookup(g->nodes, &g->ht, k);
+    if (NEITHER_FF_NOR_FE(i)) {
+        *F = (@_IterF) {
+            .i = (GLASS_SIZE) i,
+            .k = k,
+            .bit_pos = @_bit_pos_from_leaf(),
+        };
+        return 1;
+    }
+    return IS_FE(i) ? -1 : 0;
+}
+#endif
+
+@~force_inline @Iter @_samsara_leaf(
+        @Glass *g,
+        @_Node *x,
+        @_IterF F,
+        int B,
+        bool mess_with_cache,
+        int cache_depth)
+{
+    (void) mess_with_cache;
+    (void) cache_depth;
+
+    @_mask_enable_bit(&x->mask, B);
+
+#if GLASS_WITH_HT
+    @_ht_insert_new(g->nodes, &g->ht, F.k, F.i);
+    @_ht_health_check(g, 1);
+#endif
+
+#if GLASS_WITH_CACHE
+    if (mess_with_cache) {
+        @_F_insert_cache_entry_postleaf(g, &F, cache_depth);
+    }
+#endif
+
+    return @_F_finalize(&F);
+}
+
+#if GLASS_WITH_ADD_NODE_MULTIPLE
+@~force_inline @Iter @_samsara(
+        @Glass *g,
+        @_IterF F,
+        bool mess_with_cache,
+        bool init_cache,
+        int cache_depth)
+{
+    (void) mess_with_cache;
+    (void) init_cache;
+
+#if GLASS_WITH_CACHE
+    if (mess_with_cache && init_cache) {
+        cache_depth = @_F_insert_cache_begin(g, &F);
+    }
+#endif
+
+#if GLASS_WITH_CACHE
+    int depth = mess_with_cache ? cache_depth : @_bit_pos_to_depth(F.bit_pos);
+#else
+    int depth = @_bit_pos_to_depth(F.bit_pos);
+#endif
+
+    size_t nA = @_NCHUNKS - 1 - depth;
+
+    @_Node *nodes = g->nodes;
+    GLASS_SIZE A[@_NCHUNKS - 1];
+    if (unlikely(!@_add_node_multiple_nonroot(g, nodes, F.i, A, nA))) {
+        nodes = g->nodes;
+    }
+
+    for (size_t i = 0; i < nA; ++i) {
+        @_Node *x = &nodes[F.i];
+        int B = @_F_part(&F);
+        @_mask_enable_bit(&x->mask, B);
+
+        @_F_down_assign(x, &F, B, A[i]);
+
+#if GLASS_WITH_CACHE
+        if (mess_with_cache) {
+            cache_depth = @_F_insert_cache_entry(g, &F, cache_depth);
+        }
+#endif
+    }
+
+    GLASS_STATS_CALLBACK(@_CHANNEL_SAMSARA, (int) nA);
+
+    int B = @_bitter_k_extract_postleaf(F.k);
+    @_Node *x = &nodes[F.i];
+    return @_samsara_leaf(g, x, F, B, mess_with_cache, cache_depth);
+}
+
+#else
+@~force_inline @Iter @_samsara(
+        @Glass *g,
+        @_IterF F,
+        bool mess_with_cache,
+        bool init_cache,
+        int cache_depth)
+{
+    (void) mess_with_cache;
+    (void) init_cache;
+
+#if GLASS_WITH_CACHE
+    if (mess_with_cache && init_cache) {
+        cache_depth = @_F_insert_cache_begin(g, &F);
+    }
+#endif
+
+    int n = 1;
+
+    @_Node *nodes = g->nodes;
+
+    for (;; ++n) {
+        if (@_F_is_leaf(&F)) {
+            break;
+        }
+
+        @_Node *x = &nodes[F.i];
+
+        int B = @_F_part(&F);
+
+        @_mask_enable_bit(&x->mask, B);
+
+        @_GLASS_SIZE_OR_FF j = @_add_node_immediate_nonroot(g, nodes, F.i);
+        if (unlikely(IS_FF(j))) {
+            j = @_add_node(g, F.i, false);
+            nodes = g->nodes;
+            x = &nodes[F.i];
+        }
+
+        @_F_down_assign(x, &F, B, j);
+
+#if GLASS_WITH_CACHE
+        if (mess_with_cache) {
+            cache_depth = @_F_insert_cache_entry(g, &F, cache_depth);
+        }
+#endif
+    }
+
+    GLASS_STATS_CALLBACK(@_CHANNEL_SAMSARA, n);
+
+    int B = @_bitter_k_extract_postleaf(F.k);
+    @_Node *x = &nodes[F.i];
+    return @_samsara_leaf(g, x, F, B, mess_with_cache, cache_depth);
+}
+#endif
+
+@~force_inline @Iter @_climb_down_leaf(@Glass *g, @_IterF F, bool *create, bool mess_with_cache, int cache_depth)
+{
+    int B = @_bitter_k_extract_postleaf(F.k);
+    @_Node *x = &g->nodes[F.i];
+
+    if (@_mask_test_bit(x->mask, B)) {
+#if GLASS_WITH_CACHE
+        if (mess_with_cache) {
+            @_F_insert_cache_entry_postleaf(g, &F, cache_depth);
+        }
+#endif
+        return @_F_finalize(&F);
+    } else {
+        if (create) {
+            *create = true;
+            return @_samsara_leaf(g, x, F, B, mess_with_cache, cache_depth);
+        } else {
+#if GLASS_WITH_CACHE
+        if (mess_with_cache) {
+            @_F_insert_cache_entry_bail_out(g, &F, cache_depth);
+        }
+#endif
+            return (@Iter) GLASS__ITER_END;
+        }
+    }
+}
+
+@~force_inline @Iter @_template_climb_down(
+        @Glass *g,
+        GLASS_KEY k,
+        const @Iter *hint,
+        bool *create,
+        bool mess_with_cache)
+{
+    (void) mess_with_cache;
+
+    int n = 0;
+    @_Node *nodes = g->nodes;
+    int cache_depth = 0;
+
+    @_IterF F;
+
+#if GLASS_WITH_HT
+    {
+        int ht_res = @_F_from_ht(g, k, &F);
+        if (ht_res > 0) {
+            GLASS_STATS_CALLBACK(@_CHANNEL_CLIMB_DOWN, 0);
+            goto leaf_from_ht;
+        } else if (!create && ht_res < 0) {
+            GLASS_STATS_CALLBACK(@_CHANNEL_CLIMB_DOWN, 0);
+            return (@Iter) GLASS__ITER_END;
+        }
+    }
+#endif
+
+    {
+#if GLASS_WITH_CACHE
+        if (@_template_F_from_cache(g, k, &F, hint)) {
+            if (@_bit_pos_is_postleaf(F.bit_pos)) {
+                GLASS_STATS_CALLBACK(@_CHANNEL_CLIMB_DOWN, 0);
+                return @_F_finalize(&F);
+            }
+            goto got_F;
+        }
+        if (@_template_F_from_root(g, k, &F, (const @Iter *) 0)) {
+            goto got_F;
+        }
+#else
+        if (@_template_F_from_root(g, k, &F, hint)) {
+            goto got_F;
+        }
+#endif
+
+        GLASS_STATS_CALLBACK(@_CHANNEL_CLIMB_DOWN, 0);
+        if (create) {
+            *create = true;
+            F = @_F_create_root(g, k);
+            return @_samsara(g, F, mess_with_cache, true, 0);
+        } else {
+            return (@Iter) GLASS__ITER_END;
+        }
+    }
+
+got_F:
+#if GLASS_WITH_CACHE
+    if (mess_with_cache) {
+        cache_depth = @_F_insert_cache_begin(g, &F);
+    }
+#endif
+
+    for (++n; ; ++n) {
+        if (@_F_is_leaf(&F)) {
+            goto leaf;
+        }
+
+        @_Node *x = &nodes[F.i];
+
+        int B = @_F_part(&F);
+        if (@_mask_test_bit(x->mask, B)) {
+            @_F_down(x, &F, B);
+#if GLASS_WITH_CACHE
+            if (mess_with_cache) {
+                cache_depth = @_F_insert_cache_entry(g, &F, cache_depth);
+            }
+#endif
+        } else {
+            GLASS_STATS_CALLBACK(@_CHANNEL_CLIMB_DOWN, n);
+            if (create) {
+                *create = true;
+                return @_samsara(g, F, mess_with_cache, false, cache_depth);
+            } else {
+#if GLASS_WITH_CACHE
+                if (mess_with_cache) {
+                    @_F_insert_cache_entry_bail_out(g, &F, cache_depth);
+                }
+#endif
+                return (@Iter) GLASS__ITER_END;
+            }
+        }
+    }
+
+leaf:
+    GLASS_STATS_CALLBACK(@_CHANNEL_CLIMB_DOWN, n);
+    return @_climb_down_leaf(g, F, create, mess_with_cache, cache_depth);
+
+leaf_from_ht:
+    return @_climb_down_leaf(g, F, create, false, 0);
+}
+
+@~force_inline void @_TD_lazy_begin(@_IterTD *TD, GLASS_KEY k)
+{
+    TD->k = k;
+}
+
+@~force_inline void @_TD_lazy_down(@_Node *x, @_IterTD *TD, int B)
+{
+    *TD = (@_IterTD) {
+        .i = x->children[B],
+        .k = TD->k,
+        .bit_pos = @_bit_pos_down(TD->bit_pos),
+    };
+}
+
+@~force_inline @Iter @_TD_lazy_finalize(@_IterTD *TD)
+{
+    return (@Iter) {
+        .i = (@_GLASS_SIZE_OR_FF_FE) TD->i,
+        .k = TD->k,
+    };
+}
+
+@~force_inline void @_TD_lazy_end(@_IterTD *TD)
+{
+    TD->k = @_bitter_k_zero_lsb_including_this(TD->k, TD->bit_pos);
+}
+
+@~force_inline @Iter @_template_TDfind_nextprev_or_eq(@Glass *g, GLASS_KEY k, bool is_next, @_IterTD TD)
+{
+    @_IterTD backup = {0};
+    int backup_B = -1;
+
+    @_TD_lazy_begin(&TD, k);
+
+    @_Node *nodes = g->nodes;
+
+    int n = 1;
+    for (;; ++n) {
+        @_Node *x = &nodes[TD.i];
+
+        int chunk = @_bitter_k_select_chunk(k, TD.bit_pos);
+
+        int B = @_mask_find_nextprev(x->mask, chunk, is_next, true);
+
+        if (GLASS__MASK_IDX_VALID(B)) {
+            backup = TD;
+            backup_B = B;
+        }
+
+        if (!@_mask_test_bit(x->mask, chunk)) {
+            goto backup_plan;
+        }
+
+        if (@_TD_is_leaf(&TD)) {
+            GLASS_STATS_CALLBACK(@_CHANNEL_TDFIND_NEXTPREV, n);
+            return @_TD_lazy_finalize(&TD);
+        }
+
+        @_TD_lazy_down(x, &TD, chunk);
+    }
+
+backup_plan:
+    GLASS_STATS_CALLBACK(@_CHANNEL_TDFIND_NEXTPREV, n + 1);
+    if (!GLASS__MASK_IDX_VALID(backup_B)) {
+        return (@Iter) GLASS__ITER_END;
+    }
+    @_TD_lazy_end(&backup);
+    if (@_TD_is_leaf(&backup)) {
+        return @_TD_finalize(&backup, backup_B);
+    }
+    @_TD_down(&nodes[backup.i], &backup, backup_B);
+
+    return @_template_TDfind_first_or_last(g, backup, is_next);
+}
+
+@~force_inline @Iter @_template_find_next_or_prev_FAR(@Glass *g, GLASS_KEY k, bool is_next)
+{
+    if (is_next) {
+        if (k == GLASS__MAX_POSSIBLE_KEY) {
+            return (@Iter) GLASS__ITER_END;
+        }
+        ++k;
+    } else {
+        if (!k) {
+            return (@Iter) GLASS__ITER_END;
+        }
+        --k;
+    }
+
+    @_IterTD TD;
+    if (!@_TD_from_root(g, &TD)) {
+        return (@Iter) GLASS__ITER_END;
+    }
+    return @_template_TDfind_nextprev_or_eq(g, k, is_next, TD);
+}
+
+@~force_inline @_IterQ @_Q_from_TD(@_IterTD TD, GLASS_KEY full_k, int *P)
+{
+    return (@_IterQ) {
+        .i = TD.i,
+        .cur_k = @_bitter_k_split_chunk(full_k, TD.bit_pos, P),
+        .bit_pos = TD.bit_pos,
+    };
+}
+
+@~force_inline @Iter @_template_find_next_or_prev(@Glass *g, GLASS_KEY k, bool is_next)
+{
+    if (is_next) {
+        if (k == GLASS__MAX_POSSIBLE_KEY) {
+            return (@Iter) GLASS__ITER_END;
+        }
+        ++k;
+    } else {
+        if (!k) {
+            return (@Iter) GLASS__ITER_END;
+        }
+        --k;
+    }
+
+    @_IterTD TD;
+#if GLASS_WITH_CACHE
+    if (@_TD_from_cache(g, &TD, k, true)) {
+        if (@_bit_pos_is_postleaf(TD.bit_pos)) {
+            return @_TD_finalize_postleaf(&TD);
+        }
+    } else {
+        if (!@_TD_from_root(g, &TD)) {
+            return (@Iter) GLASS__ITER_END;
+        }
+    }
+#else
+    if (!@_TD_from_root(g, &TD)) {
+        return (@Iter) GLASS__ITER_END;
+    }
+#endif
+
+    @Iter it = @_template_TDfind_nextprev_or_eq(g, k, is_next, TD);
+    if (!@iter_is_end(it)) {
+        return it;
+    }
+
+    int P;
+    @_IterQ Q = @_Q_from_TD(TD, k, &P);
+    return @_template_Qfind(g, is_next, Q, P);
+}
+
+#if GLASS_WITH_FIRST_LAST_PTRS
+@~force_inline void @_remove_first_or_last_ptr(@Glass *g, @Iter *ptr, GLASS_KEY k_to_remove, bool is_first)
+{
+    // The *ptr can not be GLASS__ITER_END, otherwise we could not have removed anything.
+
+#if GLASS_WITH_FIRST_LAST_PTRS_LAZY
+    (void) g;
+    (void) is_first;
+
+    // If '*ptr' was already "bad", this does nothing regardless of 'k_to_remove'.
+    if (ptr->k == k_to_remove) {
+        *ptr = (@Iter) GLASS__ITER_BAD;
+    }
+#else
+    if (ptr->k == k_to_remove) {
+        *ptr = @_template_iter_next_or_prev(g, is_first, *ptr, 0);
+    }
+#endif
+}
+#endif
+
+@~force_inline
+void @_template_erase_by_iter(@Glass *g, @Iter it, bool mess_with_first_last_ptrs)
+{
+    (void) mess_with_first_last_ptrs;
+
+#if GLASS_WITH_FIRST_LAST_PTRS
+    if (mess_with_first_last_ptrs) {
+        size_t old_size = g->size;
+        if (old_size == 1) {
+            g->first_ptr = (@Iter) GLASS__ITER_END;
+            g->last_ptr = (@Iter) GLASS__ITER_END;
+#if ! GLASS_WITH_FIRST_LAST_PTRS_LAZY
+        } else if (old_size == 2) {
+            @Iter the_only_remaining = g->first_ptr.k == it.k ? g->last_ptr : g->first_ptr;
+            g->first_ptr = the_only_remaining;
+            g->last_ptr = the_only_remaining;
+# endif
+        } else {
+            @_remove_first_or_last_ptr(g, &g->first_ptr, it.k, true);
+            @_remove_first_or_last_ptr(g, &g->last_ptr, it.k, false);
+        }
+    }
+#endif
+
+    @_IterF F = @_F_from_I(it);
+    --g->size;
+
+    @_Node *nodes = g->nodes;
+
+#define REMOVE_BIT(X_, B_) \
+    do { \
+        if (@_mask_disable_bit_E(&(X_)->mask, (B_))) { \
+            goto done; \
+        } \
+    } while (0)
+
+#define REMOVE_NODE() @_remove_node(g, nodes, F.i)
+
+#define UP() \
+    do { \
+        if (!@_F_up(nodes, &F)) { \
+            goto removed_root; \
+        } \
+    } while (0)
+
+    int B = @_bitter_k_extract_postleaf(F.k);
+
+    int n = 1;
+    for (;; ++n) {
+        @_Node *x = &nodes[F.i];
+        REMOVE_BIT(x, B);
+        REMOVE_NODE();
+        UP();
+        B = @_F_part(&F);
+    }
+
+removed_root:
+    GLASS_STATS_CALLBACK(@_CHANNEL_ERASE, n);
+    g->root = -1;
+#if GLASS_WITH_CACHE
+    g->cache.ptrs_depth = 0;
+#endif
+    goto ht_stuff;
+
+done:
+    GLASS_STATS_CALLBACK(@_CHANNEL_ERASE, n);
+#if GLASS_WITH_CACHE
+    {
+        int chunks_eq_upper = @_bitter_common_chunks(F.k, g->cache.last_k);
+        int cache_depth = g->cache.ptrs_depth;
+        if (chunks_eq_upper > cache_depth) {
+            chunks_eq_upper = cache_depth;
+        }
+
+        // int chunks_we_actually_cut_off = @_NCHUNKS - @_bit_pos_to_depth(F.bit_pos);
+        // int intersection = chunks_we_actually_cut_off + chunks_eq_upper - @_NCHUNKS;
+        int intersection = chunks_eq_upper - @_bit_pos_to_depth(F.bit_pos);
+
+        if (intersection > 0) {
+            if ((cache_depth -= intersection) < 0) {
+                cache_depth = 0;
+            }
+            g->cache.ptrs_depth = cache_depth;
+        }
+    }
+#endif
+
+ht_stuff:
+#if GLASS_WITH_HT
+    if (!@_F_is_leaf(&F)) {
+        @_ht_remove(nodes, &g->ht, it.k, it.i);
+        @_ht_health_check(g, 0);
+    }
+#endif
+    return;
+
+#undef REMOVE_BIT
+#undef REMOVE_NODE
+#undef UP
+}
+
+@~inline void @erase_by_iter(@Glass *g, @Iter it)
+{
+    @_template_erase_by_iter(g, it, true);
+}
+
+@~force_inline void @iter_assign(@Glass *g, @Iter it, GLASS_SIZE v)
+{
+    GLASS_SIZE chunk = @_bitter_k_extract_postleaf(it.k);
+    g->nodes[it.i].children[chunk] = v;
+}
+
+@~force_inline bool @_template_insert(@Glass *g, GLASS_KEY k, GLASS_SIZE v, const @Iter *hint)
+{
+    bool created = false;
+    @Iter it = @_template_climb_down(g, k, hint, &created, true);
+#if GLASS_WITH_FIRST_LAST_PTRS
+    if (created) {
+        @_update_first_or_last_ptr(&g->first_ptr, it, true);
+        @_update_first_or_last_ptr(&g->last_ptr, it, false);
+    }
+#endif
+    g->size += created;
+    @iter_assign(g, it, v);
+    return !created;
+}
+
+@~force_inline @Iter @_template_insert_or_find(@Glass *g, GLASS_KEY k, bool *inserted, const @Iter *hint)
+{
+    bool created = false;
+    @Iter it = @_template_climb_down(g, k, hint, &created, true);
+    *inserted = created;
+#if GLASS_WITH_FIRST_LAST_PTRS
+    if (created) {
+        @_update_first_or_last_ptr(&g->first_ptr, it, true);
+        @_update_first_or_last_ptr(&g->last_ptr, it, false);
+    }
+#endif
+    g->size += created;
+    return it;
+}
+
+@~inline bool @insert(@Glass *g, GLASS_KEY k, GLASS_SIZE v)
+{
+    return @_template_insert(g, k, v, (const @Iter *) 0);
+}
+
+@~inline @Iter @insert_or_find(@Glass *g, GLASS_KEY k, bool *inserted)
+{
+    return @_template_insert_or_find(g, k, inserted, (const @Iter *) 0);
+}
+
+@~inline bool @insert_with_hint(@Glass *g, GLASS_KEY k, GLASS_SIZE v, @Iter hint)
+{
+    return @_template_insert(g, k, v, &hint);
+}
+
+@~inline @Iter @insert_or_find_with_hint(@Glass *g, GLASS_KEY k, bool *inserted, @Iter hint)
+{
+    return @_template_insert_or_find(g, k, inserted, &hint);
+}
+
+@~force_inline @Iter @_template_find(@Glass *g, GLASS_KEY k, const @Iter *hint)
+{
+    return @_template_climb_down(g, k, hint, (bool *) 0, true);
+}
+
+@~force_inline @Iter @find(@Glass *g, GLASS_KEY k)
+{
+    return @_template_find(g, k, (const @Iter *) 0);
+}
+
+@~force_inline @Iter @find_with_hint(@Glass *g, GLASS_KEY k, @Iter hint)
+{
+    return @_template_find(g, k, &hint);
+}
+
+@~inline bool @replace(@Glass *g, GLASS_KEY k, GLASS_SIZE v)
+{
+    @Iter it = @_template_find(g, k, (const @Iter *) 0);
+    if (!@iter_is_end(it)) {
+        @iter_assign(g, it, v);
+        return true;
+    }
+    return false;
+}
+
+@~inline bool @replace_with_hint(@Glass *g, GLASS_KEY k, GLASS_SIZE v, @Iter hint)
+{
+    @Iter it = @_template_find(g, k, &hint);
+    if (!@iter_is_end(it)) {
+        @iter_assign(g, it, v);
+        return true;
+    }
+    return false;
+}
+
+@~force_inline bool @_template_erase(@Glass *g, GLASS_KEY k, const @Iter *hint)
+{
+    @Iter it = @_template_find(g, k, hint);
+    if (@iter_is_end(it)) {
+        return false;
+    }
+    @_template_erase_by_iter(g, it, true);
+    return true;
+}
+
+@~inline bool @erase(@Glass *g, GLASS_KEY k)
+{
+    return @_template_erase(g, k, (const @Iter *) 0);
+}
+
+@~inline bool @erase_with_hint(@Glass *g, GLASS_KEY k, @Iter hint)
+{
+    return @_template_erase(g, k, &hint);
+}
+
+@~inline @Iter @iter_next(@Glass *g, @Iter it)
+{
+    return @_template_iter_next_or_prev(g, true, it, @_FLAG_UPDATE_PTR);
+}
+
+@~inline @Iter @iter_prev(@Glass *g, @Iter it)
+{
+    return @_template_iter_next_or_prev(g, false, it, @_FLAG_UPDATE_PTR);
+}
+
+@~inline @Iter @iter_next_FAR(@Glass *g, @Iter it)
+{
+    return @_template_find_next_or_prev_FAR(g, it.k, true);
+}
+
+@~inline @Iter @iter_prev_FAR(@Glass *g, @Iter it)
+{
+    return @_template_find_next_or_prev_FAR(g, it.k, false);
+}
+
+@~inline @Iter @find_next(@Glass *g, GLASS_KEY k)
+{
+    return @_template_find_next_or_prev(g, k, true);
+}
+
+@~inline @Iter @find_prev(@Glass *g, GLASS_KEY k)
+{
+    return @_template_find_next_or_prev(g, k, false);
+}
+
+@~inline @Iter @find_next_FAR(@Glass *g, GLASS_KEY k)
+{
+    return @_template_find_next_or_prev_FAR(g, k, true);
+}
+
+@~inline @Iter @find_prev_FAR(@Glass *g, GLASS_KEY k)
+{
+    return @_template_find_next_or_prev_FAR(g, k, false);
+}
+
+@~inline @Iter @begin(@Glass *g)
+{
+    return @_template_find_first_or_last(g, true, @_FLAG_UPDATE_PTR);
+}
+
+@~inline @Iter @last(@Glass *g)
+{
+    return @_template_find_first_or_last(g, false, @_FLAG_UPDATE_PTR);
+}
+
+@~force_inline GLASS_SIZE @iter_get_value(@Glass *g, @Iter it)
+{
+    GLASS_KEY chunk = @_bitter_k_extract_postleaf(it.k);
+    return g->nodes[it.i].children[chunk];
+}
+
+@~force_inline GLASS_SIZE *@iter_get_ptr_to_value(@Glass *g, @Iter it)
+{
+    GLASS_KEY chunk = @_bitter_k_extract_postleaf(it.k);
+    return &g->nodes[it.i].children[chunk];
+}
+
+@~force_inline GLASS_KEY @iter_get_key(@Glass *g, @Iter it)
+{
+    (void) g;
+    return it.k;
+}
+
+@~force_inline bool @iter_eq(@Glass *g, @Iter a, @Iter b)
+{
+    (void) g;
+    return a.i == b.i && a.k == b.k;
+}
+
+@~force_inline bool @iter_less(@Glass *g, @Iter a, @Iter b)
+{
+    (void) g;
+
+    bool a_end = @iter_is_end(a);
+    bool b_end = @iter_is_end(b);
+
+    if (a_end) {
+        return !b_end;
+    }
+    return b_end || (a.k < b.k);
+}
+
+@~force_inline size_t @max_capacity(void)
+{
+    return GLASS__MAX_CAPACITY;
+}
+
+@~force_inline size_t @size_to_max_capacity(size_t sz)
+{
+    if (!sz) {
+        return 0;
+    }
+
+    size_t cur = ((size_t) 1) << @_ODD_CHUNK_WIDTH;
+    if (cur > sz) {
+        cur = sz;
+    }
+    size_t res = 1 + cur;
+
+    for (int i = 2; i < @_NCHUNKS; ++i) {
+        if (cur < sz) {
+            if (__builtin_mul_overflow(cur, ((size_t) 1) << @_C, &cur) || cur > sz) {
+                cur = sz;
+            }
+        }
+        if (unlikely(__builtin_add_overflow(res, cur, &res))) {
+            goto overflow;
+        }
+    }
+    return res;
+
+overflow:
+    return -1;
+}
+
+@~force_inline size_t @max_size(size_t capacity)
+{
+    size_t lb = 0;
+    size_t rb = GLASS__MAX_CAPACITY;
+
+    while (rb - lb > 1) {
+        size_t m = lb + (rb - lb) / 2;
+        if (@size_to_max_capacity(m) <= capacity) {
+            lb = m;
+        } else {
+            rb = m;
+        }
+    }
+
+    return lb;
+}

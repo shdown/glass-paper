@@ -1,0 +1,24 @@
+// (c) 2025 shdown
+// This code is licensed under MIT license (see LICENSE.MIT for details)
+
+#if GLASS_WITH_ASM
+
+#include <x86gprintrin.h>
+
+@@temp
+#define glass_asm_bextr__raw(X_, Y_) GLASS_GENERIC_2(__typeof__((X_)), (X_), (Y_), __builtin_ia32_bextr_u32, __builtin_ia32_bextr_u64)
+
+@@temp
+#define glass_asm_bzhi__raw(X_, Y_) GLASS_GENERIC_2(__typeof__((X_)), (X_), (Y_), __builtin_ia32_bzhi_si, __builtin_ia32_bzhi_di)
+
+@@temp
+#define GLASS__ASM_EXTRACT_BITS(X_, LowestBitToCopy_, Length_) \
+    glass_asm_bextr__raw( \
+        (X_), \
+        ((LowestBitToCopy_) | ((Length_) << 8)))
+
+@@temp
+#define GLASS__ASM_CLEAR_HI(X_, LowestBitToZero_) \
+    glass_asm_bzhi__raw((X_), (LowestBitToZero_))
+
+#endif

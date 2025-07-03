@@ -1,0 +1,130 @@
+// (c) 2025 shdown
+// This code is licensed under MIT license (see LICENSE.MIT for details)
+
+#if GLASS_N < 2
+# error "GLASS_N < 2, what do you even want, man."
+#endif
+
+#if GLASS_N <= 8
+@@temp
+#define GLASS_MASK_BITS 8
+typedef uint8_t @_MASK;
+
+#elif GLASS_N <= 16
+@@temp
+#define GLASS_MASK_BITS 16
+typedef uint16_t @_MASK;
+
+#elif GLASS_N <= 32
+@@temp
+#define GLASS_MASK_BITS 32
+typedef uint32_t @_MASK;
+
+#elif GLASS_N <= 64
+@@temp
+#define GLASS_MASK_BITS 64
+typedef uint64_t @_MASK;
+
+#elif GLASS_N <= 128
+@@temp
+#define GLASS_MASK_BITS 128
+typedef unsigned __int128 @_MASK;
+
+#else
+#define GLASS_MASK_BITS GLASS_N
+typedef unsigned _BitInt(GLASS_N) @_MASK;
+#endif
+
+#define GLASS__PREVNEXT_T @_MASK
+#define GLASS__PREVNEXT_N GLASS_MASK_BITS
+#define GLASS__PREVNEXT_PREFIX @_mask_PN
+#include "glass_prevnext.h"
+
+@@temp
+#define GLASS__MASK_IDX_VALID(X_) (((unsigned) (X_)) < GLASS_MASK_BITS)
+
+@~force_inline @_MASK @_mask_new_empty(void)
+{
+    return 0;
+}
+
+@~force_inline int @_mask_find_nextprev(@_MASK m, int idx, bool is_next, bool neq)
+{
+#if GLASS_N == 2
+    if (neq) {
+        if (is_next) {
+            return (m & 2) - 1 - idx;
+        } else {
+            return (m & idx) - 1;
+        }
+    }
+#endif
+    @_MASK cruft =
+        is_next
+            ?
+            (neq
+                ?
+                @_mask_PN_zero_lo_inclusive(m, idx)
+                :
+                @_mask_PN_zero_lo_exclusive(m, idx))
+            :
+            (neq
+                ?
+                @_mask_PN_zero_hi_inclusive(m, idx)
+                :
+                @_mask_PN_zero_hi_exclusive(m, idx));
+
+    return is_next
+        ?
+        @_mask_PN_find_first_set(cruft, true)
+        :
+        @_mask_PN_find_last_set(cruft, true);
+}
+
+@~force_inline int @_mask_find_firstlast(@_MASK m, bool is_first)
+{
+    return is_first
+        ?
+        @_mask_PN_find_first_set(m, false)
+        :
+        @_mask_PN_find_last_set(m, false);
+}
+
+@~force_inline bool @_mask_nonzero_without_E(@_MASK m, int idx)
+{
+    @_MASK bit = ((@_MASK) 1) << idx;
+    return m ^ bit;
+}
+
+@~force_inline int @_mask_popcount(@_MASK m)
+{
+    return glass_popcountg(m);
+}
+
+// Returns true if the the mask is still non-empty after removal.
+@~force_inline bool @_mask_disable_bit_E(@_MASK *m, int idx)
+{
+    @_MASK bit = ((@_MASK) 1) << idx;
+    return (*m ^= bit);
+}
+
+@~force_inline bool @_mask_test_bit(@_MASK m, int idx)
+{
+    @_MASK bit = ((@_MASK) 1) << idx;
+    return m & bit;
+}
+
+@~force_inline void @_mask_enable_bit(@_MASK *m, int idx)
+{
+    @_MASK bit = ((@_MASK) 1) << idx;
+    *m |= bit;
+}
+
+// Returns true if the bit has already been enabled in this mask before.
+@~force_inline bool @_mask_test_enable_bit(@_MASK *m, int idx)
+{
+    @_MASK bit = ((@_MASK) 1) << idx;
+    bool prev = *m & bit;
+    *m |= bit;
+    return prev;
+}
