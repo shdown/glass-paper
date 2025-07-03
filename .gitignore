@@ -2,3 +2,14 @@
 a.out
 /append_license.sh
 /license_prefix.*
+/paper/*_INCLUDE.tex
+/paper/*.dot
+/paper/*.pdf
+/paper/*.aux
+/paper/*.bbl
+/paper/*.blg
+/paper/*.gnuploterrors
+/paper/*.eps
+/paper/*.gnuplot
+/paper/*-gnuplottex-*.tex
+/paper/*.log
